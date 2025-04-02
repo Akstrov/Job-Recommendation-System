@@ -1,4 +1,5 @@
-from typing import List, Dict
+from typing import List
+from pydantic import BaseModel
 
 # Define weightage for different criteria
 WEIGHTS = {
@@ -9,16 +10,39 @@ WEIGHTS = {
 }
 
 
+class Education(BaseModel):
+    degree: str
+    major: str
+
+
+class UserProfile(BaseModel):
+    id: str
+    skills: List[str]
+    experience: float
+    education: List[Education]
+    location: str
+    remote_ok: bool
+
+
+class JobRequirement(BaseModel):
+    id: str
+    required_skills: List[str]
+    min_experience: float
+    required_education: Education
+    locations: List[str]
+    remote_available: bool
+
+
 def calculate_skills_score(
     required_skills: List[str], candidate_skills: List[str]
 ) -> float:
     """Calculates skill match score (0 to 1) based on overlap."""
     matched_skills = set(required_skills) & set(candidate_skills)
-    return len(matched_skills) / len(required_skills) if required_skills else 0
+    return len(matched_skills) / len(required_skills) if required_skills else 1
 
 
 def calculate_experience_score(
-    required_experience: int, candidate_experience: int
+    required_experience: float, candidate_experience: float
 ) -> float:
     """Scores experience match (0 to 1). Full score if candidate has equal or more experience."""
     return (
@@ -28,23 +52,30 @@ def calculate_experience_score(
     )
 
 
-def calculate_education_score(required_degree: str, candidate_degree: str) -> float:
-    """Simple match function for education (1 if match, 0.5 if lower degree, 0 otherwise)."""
-    degree_levels = {"PhD": 3, "Master": 2, "Bachelor": 1, "None": 0}
-    return (
-        1.0
-        if candidate_degree == required_degree
-        else (
-            0.5
-            if degree_levels.get(candidate_degree, 0)
-            >= degree_levels.get(required_degree, 0)
-            else 0
-        )
-    )
+def calculate_education_score(
+    required_education: Education, candidate_education: List[Education]
+) -> float:
+    """Simple match function for education (1 if match, 0.5 if lower but acceptable degree, 0 otherwise)."""
+    degree_levels = {"PhD": 4, "Master": 3, "Bachelor": 2, "High School": 1, "None": 0}
+
+    required_level = degree_levels.get(required_education.degree, 0)
+    candidate_levels = [degree_levels.get(edu.degree, 0) for edu in candidate_education]
+
+    if not candidate_levels:
+        return 0.0
+
+    best_match = max(candidate_levels)
+
+    if best_match == required_level:
+        return 1.0
+    elif best_match > 0 and best_match >= required_level - 1:
+        return 0.5
+    else:
+        return 0.0
 
 
 def calculate_location_score(
-    job_location: str, candidate_location: str, remote_allowed: bool = False
+    job_locations: List[str], candidate_location: str, remote_allowed: bool
 ) -> float:
     """Improves location scoring:
     - 1.0 if same city
@@ -52,14 +83,14 @@ def calculate_location_score(
     - 0.5 if remote job and remote is allowed
     - 0 otherwise
     """
-    if job_location == candidate_location:
+    if candidate_location in job_locations:
         return 1.0  # Exact match
 
-    job_city, job_country = job_location.split(", ")
     candidate_city, candidate_country = candidate_location.split(", ")
-
-    if job_country == candidate_country:
-        return 0.8  # Same country, different city
+    for job_location in job_locations:
+        job_city, job_country = job_location.split(", ")
+        if job_country == candidate_country:
+            return 0.8  # Same country, different city
 
     if remote_allowed:
         return 0.5  # Remote work allowed, different country
@@ -67,16 +98,18 @@ def calculate_location_score(
     return 0.0  # No match
 
 
-def compute_job_match_score(job: Dict, candidate: Dict) -> float:
+def compute_job_match_score(job: JobRequirement, candidate: UserProfile) -> tuple:
     """Computes overall job match score using weighted sum."""
-    skill_score = calculate_skills_score(job["required_skills"], candidate["skills"])
+    skill_score = calculate_skills_score(job.required_skills, candidate.skills)
     experience_score = calculate_experience_score(
-        job["required_experience"], candidate["experience"]
+        job.min_experience, candidate.experience
     )
     education_score = calculate_education_score(
-        job["required_degree"], candidate["degree"]
+        job.required_education, candidate.education
     )
-    location_score = calculate_location_score(job["location"], candidate["location"])
+    location_score = calculate_location_score(
+        job.locations, candidate.location, job.remote_available or candidate.remote_ok
+    )
 
     total_score = (
         WEIGHTS["skills"] * skill_score
@@ -84,25 +117,45 @@ def compute_job_match_score(job: Dict, candidate: Dict) -> float:
         + WEIGHTS["education"] * education_score
         + WEIGHTS["location"] * location_score
     )
+    explanation = "This job was recommended because "
+    reasons = []
 
-    return round(total_score, 2)
+    if skill_score > 0.7:
+        reasons.append("you have strong skills matching the job requirements")
+    if experience_score > 0.7:
+        reasons.append("your experience aligns well with the job expectations")
+    if education_score > 0.7:
+        reasons.append("your education meets the required qualifications")
+    if location_score > 0.7:
+        reasons.append("your location is a good match for this job")
+    elif location_score > 0.5:
+        reasons.append("remote work is an option for this job")
+
+    explanation += (
+        ", and ".join(reasons) if reasons else "it meets general suitability criteria."
+    )
+
+    return round(total_score, 2), explanation
 
 
-# Example usage
+# Tests
 if __name__ == "__main__":
-    job_posting = {
-        "required_skills": ["Python", "Machine Learning", "NLP"],
-        "required_experience": 3,
-        "required_degree": "Master",
-        "location": "New York, USA",
-    }
+    job = JobRequirement(
+        id="id_job123",
+        required_skills=["Python", "Machine Learning"],
+        min_experience=3.0,
+        required_education=Education(degree="Master", major="Computer Science"),
+        locations=["New York, USA"],
+        remote_available=True,
+    )
 
-    candidate_profile = {
-        "skills": ["Python", "NLP", "Deep Learning"],
-        "experience": 2,
-        "degree": "Bachelor",
-        "location": "New York, USA",
-    }
+    candidate = UserProfile(
+        id="id_user123",
+        skills=["Python", "Data Science"],
+        experience=2.5,
+        education=[Education(degree="Bachelor", major="Computer Science")],
+        location="Los Angeles, USA",
+        remote_ok=True,
+    )
 
-    score = compute_job_match_score(job_posting, candidate_profile)
-    print(f"Job Match Score: {score}")
+    print("Job Match Score:", compute_job_match_score(job, candidate))
